@@ -1,0 +1,25 @@
+1. Clone this repo
+2. In the repository, `go run ./main.go -namespace <namespace>`
+3. Hit enter to begin helm installation, once it begins running hit CTRL+C to cancel the installation
+4. Installation goroutine is still running
+
+
+Sample output:
+
+```
+Press enter to start installation. Press ctrl+c to cancel installation once begun
+
+creating 1 resource(s)
+creating 1 resource(s)
+beginning wait for 1 resources with timeout of 30m0s
+Deployment is not ready: repro/repro. 0 out of 1 expected pods are ready
+Deployment is not ready: repro/repro. 0 out of 1 expected pods are ready
+^CCancellation requested
+error during installation: context canceled
+Press enter to exit
+Deployment is not ready: repro/repro. 0 out of 1 expected pods are ready
+```
+
+Expected behavior:
+
+Installation go routines exits at earliest convenience, no more wait output from the wait.

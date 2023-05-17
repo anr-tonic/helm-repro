@@ -1,0 +1,104 @@
+# Background
+
+We have an installer that uses helm as an SDK to install several charts needed
+for our product to work. We noticed that after we implemented functionality to
+abort an installation that we would still receive output to stdout from helm
+after the context provided to `RunWithContext` is canceled. In our case, it
+appears that it is because use the helm provided wait functionality.
+
+In this report, I'm picking on `action.Install` as its where I've spent the
+most time, however `action.Upgrade` also exposes a `RunWithContext` method that
+appears to have similar characteristics to Install's.
+
+While it is possible for our installer to work around this issue by
+implementing our own wait logic, there are other avenues to trigger this
+behavior:
+
+* Requiring post-install hooks to run after chart resources have become
+  available
+* pre-install hook that does not become ready before the context is cancelled
+  by the caller
+
+Theoretically, a pre-install hook could run for timeout - 1, the context would
+cancel, but the creation of k8s resources and wait could still happen until the
+timeout expires. I haven't attempted to contrive a scenario to examine what
+would actually happen in this case.
+
+# Cause
+
+Even though `RunWithContext` will return control to the caller after its
+context has been canceled, the `performInstall` go routine is still running in
+the background because it does not participate in using the context passed to
+`RunWithContext`.
+
+Methods on `kube.Interface` also do not participate in using a context. When
+calling `kube.Client` methods that invoke a method on
+`k8s.io/client-go/kubernetes/ClientSet` that requires a context, it uses
+`context.Background()`, often combined with `context.WithTimeout` from a
+`time.Duration` that has been passed down.
+
+# Possible solution
+
+Similar to other extensions to `kube.Interface` that seek to avoid breaking
+backwards compatibility, an additional interface could be created that exposes
+methods that accept `context.Context` instead of `time.Duration`. The
+implementations of the existing non context aware methods then delegate to
+implementations of this interface. This would additionally require methods on
+types like `kube.waiter` to accept this context instead of constructing one
+from the background context and a timeout value. Roughly:
+
+
+```go
+type InterfaceWithContext interface {
+    WaitWithContext(context.Context, ResourceList) error
+    WatchUntilReadyWithContext(context.Context, ResourceList) error
+    WaitAndGetCompletedPodPhaseWithContext(context.Context, string) (v1.PodPhase, error)
+    WaitForDeleteWithContext(context.Context, ResourceList) error
+}
+
+func (c *Client) Wait(resources ResourceList, timeout time.Duration) {
+    return c.WaitWithContext(
+        context.WithTimeout(context.Background(), timeout),
+        resources,
+    )
+}
+
+func (c *Client) WaitWithContext(ctx context.Context, resources ResourceList) error {
+	cs, err := c.getKubeClient()
+	if err != nil {
+		return err
+	}
+	checker := NewReadyChecker(cs, c.Log, PausedAsReady(true))
+	w := waiter{
+		c:       checker,
+		log:     c.Log,
+        # timeout field removed
+	}
+	return w.waitForResources(ctx, resources)
+}
+```
+
+`performInstall` is then responsible for accepting `RunWithContext`'s context
+and passing it into `kube.InterfaceWithContext` methods (if available via type
+casting). Additionally, the unexported `Configuration.execHook` should be
+updated to accept this context instead of a duration.
+
+If desired, this implementation _could_ remove the channels used between
+`RunWithContext`, `performInstall` and `handleContext` since the context is
+user provided. It is worth noting there are several issues and fixes for these
+channels:
+
+* #10489
+* #11805
+* #11971
+* #11978
+
+Actions that do not expose a `RunWithContext` method but would need to interact
+with methods now requesting a context should use `context.TODO()` instead of
+`context.Background()` where necessary to signal that they should be expanded
+to support contexts.
+
+When Helm 4 is being prepared, the existing non-context aware methods on
+`kube.Interface` can be replaced with the matching context aware methods.
+Actions using `context.TODO()` can be expanded into accepting a
+`context.Context` which will be passed in place of the `TODO` context.

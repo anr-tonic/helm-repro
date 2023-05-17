@@ -1,0 +1,28 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: repro
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+     "app.kubernetes.io/name": repro
+  template:
+    metadata:
+      labels:
+        "app.kubernetes.io/name": repro
+    spec:
+      containers:
+        - name: liveness
+          image: registry.k8s.io/busybox
+          args:
+          - /bin/sh
+          - -c
+          - sleep 300; touch /tmp/healthy; sleep 30; rm -f /tmp/healthy; sleep 600
+          readinessProbe:
+            exec:
+              command:
+              - cat
+              - /tmp/healthy
+            initialDelaySeconds: 5
+            periodSeconds: 5
